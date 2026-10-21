@@ -1,1 +1,1 @@
-docker run -d --name mosquitto -p 1883:1883 -v "D:\go\witches\w-mqtt\mosquitto.conf:/mosquitto/config/mosquitto.conf" eclipse-mosquitto:2
+docker run -d --name mosquitto -p 1883:1883 -v "..path..\mosquitto.conf:/mosquitto/config/mosquitto.conf" eclipse-mosquitto:2
