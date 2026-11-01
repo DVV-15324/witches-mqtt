@@ -8,29 +8,29 @@ import (
 
 type Config struct {
 	// Broker
-	BrokerURL    string        `yaml:"broker_url"`
-	ClientID     string        `yaml:"client_id"`
-	Username     string        `yaml:"username"`
-	Password     string        `yaml:"password"`
-	KeepAlive    time.Duration `yaml:"keep_alive"`
-	ConnectRetry time.Duration `yaml:"connect_retry"`
-	CleanSession bool          `yaml:"clean_session"`
+	BrokerURL    string
+	ClientID     string
+	Username     string
+	Password     string
+	KeepAlive    time.Duration
+	ConnectRetry time.Duration
+	CleanSession bool
 
 	// Behaviour
-	QoS            byte   `yaml:"qos"`             // default 1
-	BufferSize     int    `yaml:"buffer_size"`     // default 512
-	MaxConcurrency int    `yaml:"max_concurrency"` // default 64, 0 = unlimited
-	StatusTopic    string `yaml:"status_topic"`    // default v1/services/{client_id}/status
+	QoS            byte   // default 1
+	BufferSize     int    // default 512
+	MaxConcurrency int    // default 64, 0 = unlimited
+	StatusTopic    string // default v1/services/{client_id}/status
 
-	// TLS
-	TLS *TLSConfig `yaml:"tls,omitempty"`
+	// TLS (Bỏ comment khi production)
+	TLS *TLSConfig
 }
 
 type TLSConfig struct {
-	CAFile   string `yaml:"ca_file"`
-	CertFile string `yaml:"cert_file"`
-	KeyFile  string `yaml:"key_file"`
-	Insecure bool   `yaml:"insecure"`
+	CAFile   string
+	CertFile string
+	KeyFile  string
+	Insecure bool
 }
 
 func (c *Config) setDefaults() {

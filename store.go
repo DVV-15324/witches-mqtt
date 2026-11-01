@@ -5,17 +5,15 @@ import (
 	"sync"
 )
 
-// Store lưu event. Idempotent theo (DeviceID, Seq) — QoS 1 có thể trùng.
 type Store interface {
 	Save(ctx context.Context, e Event) error
 	Pending(ctx context.Context, deviceID string) ([]Event, error)
 	Confirm(ctx context.Context, deviceID string, seq uint64) error
 }
 
-// MemoryStore cho dev/test. Production: Postgres với UNIQUE(device_id, seq).
 type MemoryStore struct {
 	mu   sync.Mutex
-	data map[string]Event // key: deviceID:seq
+	data map[string]Event
 	ord  []string
 }
 

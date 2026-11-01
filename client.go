@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"sync/atomic"
 	"time"
@@ -20,21 +19,21 @@ type Client struct {
 	bus    *EventBus
 	store  Store
 	paho   paho.Client
-	log    *slog.Logger
+	log    ILogger
 	ctx    context.Context
 	cancel context.CancelFunc
 	up     atomic.Bool
-	sem    chan struct{} // giới hạn concurrency
+	sem    chan struct{}
 }
 
-func newClient(cfg Config, r *Router, bus *EventBus, store Store, log *slog.Logger) *Client {
+func newClient(cfg Config, r *Router, bus *EventBus, store Store, log ILogger) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Client{
 		cfg:    cfg,
 		router: r,
 		bus:    bus,
 		store:  store,
-		log:    log.With("component", "witches-mqtt"),
+		log:    log,
 		ctx:    ctx,
 		cancel: cancel,
 	}
@@ -73,14 +72,14 @@ func (c *Client) connect() error {
 
 	opts.SetOnConnectHandler(func(_ paho.Client) {
 		c.up.Store(true)
-		c.log.Info("connected", "broker", c.cfg.BrokerURL)
+		c.log.Info(fmt.Sprintf("connected broker %s", c.cfg.BrokerURL))
 		if err := c.subscribeAll(); err != nil {
-			c.log.Error("resubscribe failed", "err", err)
+			c.log.Error(fmt.Sprintf("resubscribe failed: %v", err))
 		}
 	})
 	opts.SetConnectionLostHandler(func(_ paho.Client, err error) {
 		c.up.Store(false)
-		c.log.Warn("connection lost", "err", err)
+		c.log.Warn(fmt.Sprintf("connection lost: %v", err))
 	})
 
 	c.paho = paho.NewClient(opts)
@@ -134,13 +133,13 @@ func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
 		case c.sem <- struct{}{}:
 			defer func() { <-c.sem }()
 		default:
-			c.log.Warn("concurrency limit hit, dropping", "topic", msg.Topic())
+			c.log.Warn(fmt.Sprintf("concurrency limit hit, dropping topic=%s", msg.Topic()))
 			return
 		}
 	}
 	go func() {
 		if err := c.router.Dispatch(c.ctx, msg.Topic(), msg.Payload()); err != nil {
-			c.log.Error("dispatch failed", "topic", msg.Topic(), "err", err)
+			c.log.Error(fmt.Sprintf("dispatch failed, topic=%s, err=%v", msg.Topic(), err))
 		}
 	}()
 }
