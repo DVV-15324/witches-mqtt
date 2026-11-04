@@ -47,8 +47,6 @@ func (c *Client) connect() error {
 	opts := paho.NewClientOptions().
 		AddBroker(c.cfg.BrokerURL).
 		SetClientID(c.cfg.ClientID).
-		SetUsername(c.cfg.Username).
-		SetPassword(c.cfg.Password).
 		SetKeepAlive(c.cfg.KeepAlive).
 		SetAutoReconnect(true).
 		SetConnectRetry(true).
@@ -57,10 +55,6 @@ func (c *Client) connect() error {
 		SetConnectTimeout(10 * time.Second).
 		SetCleanSession(c.cfg.CleanSession).
 		SetOrderMatters(false)
-
-	if c.cfg.StatusTopic != "" {
-		opts.SetWill(c.cfg.StatusTopic, "offline", c.cfg.QoS, true)
-	}
 
 	if c.cfg.TLS != nil {
 		tlsCfg, err := buildTLS(c.cfg.TLS)
@@ -91,24 +85,25 @@ func (c *Client) connect() error {
 }
 
 func buildTLS(c *TLSConfig) (*tls.Config, error) {
-	cfg := &tls.Config{InsecureSkipVerify: c.Insecure}
-	if c.CAFile != "" {
-		ca, err := os.ReadFile(c.CAFile)
-		if err != nil {
-			return nil, err
-		}
-		pool := x509.NewCertPool()
-		pool.AppendCertsFromPEM(ca)
-		cfg.RootCAs = pool
+	ca, err := os.ReadFile(c.CAFile)
+	if err != nil {
+		return nil, fmt.Errorf("read ca: %w", err)
 	}
-	if c.CertFile != "" && c.KeyFile != "" {
-		cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
-		if err != nil {
-			return nil, err
-		}
-		cfg.Certificates = []tls.Certificate{cert}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(ca) {
+		return nil, errors.New("invalid CA pem")
 	}
-	return cfg, nil
+
+	cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load client keypair: %w", err)
+	}
+
+	return &tls.Config{
+		RootCAs:      pool,
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}, nil
 }
 
 func (c *Client) subscribeAll() error {
@@ -128,17 +123,22 @@ func (c *Client) subscribeAll() error {
 }
 
 func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
+	topic := msg.Topic()
+	payload := append([]byte(nil), msg.Payload()...)
+
 	if c.sem != nil {
 		select {
 		case c.sem <- struct{}{}:
-			defer func() { <-c.sem }()
 		default:
 			c.log.Warn(fmt.Sprintf("concurrency limit hit, dropping topic=%s", msg.Topic()))
 			return
 		}
 	}
 	go func() {
-		if err := c.router.Dispatch(c.ctx, msg.Topic(), msg.Payload()); err != nil {
+		if c.sem != nil {
+			defer func() { <-c.sem }()
+		}
+		if err := c.router.Dispatch(c.ctx, topic, payload); err != nil {
 			c.log.Error(fmt.Sprintf("dispatch failed, topic=%s, err=%v", msg.Topic(), err))
 		}
 	}()

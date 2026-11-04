@@ -24,10 +24,12 @@ func NewMemoryStore() *MemoryStore {
 func (m *MemoryStore) Save(_ context.Context, e Event) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	key := e.DeviceID + ":" + uitoa(e.Seq)
+
+	key := storeKey(e)
 	if _, ok := m.data[key]; ok {
 		return nil // dedupe
 	}
+
 	m.data[key] = e
 	m.ord = append(m.ord, key)
 	return nil
@@ -49,7 +51,7 @@ func (m *MemoryStore) Pending(_ context.Context, deviceID string) ([]Event, erro
 func (m *MemoryStore) Confirm(_ context.Context, deviceID string, seq uint64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	key := deviceID + ":" + uitoa(seq)
+	key := deviceID + ":s:" + uitoa(seq)
 	if e, ok := m.data[key]; ok {
 		e.Status = "confirmed"
 		m.data[key] = e
@@ -69,4 +71,13 @@ func uitoa(u uint64) string {
 		u /= 10
 	}
 	return string(b[i:])
+}
+
+func storeKey(e Event) string {
+	if e.Seq > 0 {
+		return e.DeviceID + ":s:" + uitoa(e.Seq)
+	}
+	return e.DeviceID + ":t:" +
+		uitoa(uint64(e.ReadingAt.UnixNano())) + ":" +
+		uitoa(uint64(e.ReceivedAt.UnixNano()))
 }

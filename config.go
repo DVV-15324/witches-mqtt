@@ -21,16 +21,13 @@ type Config struct {
 	BufferSize     int    // default 512
 	MaxConcurrency int    // default 64, 0 = unlimited
 	StatusTopic    string // default v1/services/{client_id}/status
-
-	// TLS (Bỏ comment khi production)
-	TLS *TLSConfig
+	TLS            *TLSConfig
 }
 
 type TLSConfig struct {
 	CAFile   string
 	CertFile string
 	KeyFile  string
-	Insecure bool
 }
 
 func (c *Config) setDefaults() {
@@ -60,6 +57,9 @@ func (c *Config) validate() error {
 	}
 	if c.QoS > 2 {
 		return errors.New("witches-mqtt: qos must be 0, 1, or 2")
+	}
+	if c.TLS == nil || c.TLS.CAFile == "" || c.TLS.CertFile == "" || c.TLS.KeyFile == "" {
+		return errors.New("witches-mqtt: mTLS requires tls{ca_file, cert_file, key_file}")
 	}
 	return nil
 }
