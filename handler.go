@@ -25,25 +25,3 @@ type Handler interface {
 type HandlerFunc func(ctx context.Context, e Event) error
 
 func (f HandlerFunc) Handle(ctx context.Context, e Event) error { return f(ctx, e) }
-
-type EventBus struct {
-	handlers []Handler
-}
-
-func NewEventBus(handlers ...Handler) *EventBus {
-	return &EventBus{handlers: handlers}
-}
-
-func (b *EventBus) Subscribe(h Handler) {
-	b.handlers = append(b.handlers, h)
-}
-
-func (b *EventBus) Publish(ctx context.Context, e Event) error {
-	var firstErr error
-	for _, h := range b.handlers {
-		if err := h.Handle(ctx, e); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
-}
