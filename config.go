@@ -10,12 +10,9 @@ type Config struct {
 	// Broker
 	BrokerURL    string
 	ClientID     string
-	Username     string
-	Password     string
 	KeepAlive    time.Duration
 	ConnectRetry time.Duration
 	CleanSession bool
-
 	// Behaviour
 	QoS            byte   // default 1
 	BufferSize     int    // default 512

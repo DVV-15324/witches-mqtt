@@ -22,7 +22,6 @@ func Mount(cfg Config, opts Options) (*Module, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-
 	if opts.Router == nil {
 		opts.Router = NewRouter()
 	}
@@ -35,12 +34,10 @@ func Mount(cfg Config, opts Options) (*Module, error) {
 	if opts.Store == nil {
 		opts.Store = NewMemoryStore()
 	}
-
 	c := newClient(cfg, opts.Router, opts.Bus, opts.Store, opts.Logger)
 	if err := c.connect(); err != nil {
 		return nil, err
 	}
-
 	return &Module{client: c, log: opts.Logger}, nil
 }
 
