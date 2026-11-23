@@ -7,10 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	paho "github.com/eclipse/paho.mqtt.golang"
+)
+
+var (
+	ErrClientClosed = errors.New("witches-mqtt: client closed")
+	ErrNotReady     = errors.New("witches-mqtt: client not ready")
 )
 
 type Client struct {
@@ -20,14 +26,35 @@ type Client struct {
 	store  Store
 	paho   paho.Client
 	log    ILogger
+
 	ctx    context.Context
 	cancel context.CancelFunc
-	up     atomic.Bool
-	sem    chan struct{}
+
+	connected atomic.Bool
+	ready     atomic.Bool
+	up        atomic.Bool
+
+	sem chan struct{}
+
+	mu        sync.Mutex
+	closed    bool
+	workers   sync.WaitGroup
+	closeOnce sync.Once
+
+	publishMu sync.Mutex
+
+	connectMu sync.Mutex
 }
 
-func newClient(cfg Config, r *Router, bus *EventBus, store Store, log ILogger) *Client {
+func newClient(
+	cfg Config,
+	r *Router,
+	bus *EventBus,
+	store Store,
+	log ILogger,
+) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
+
 	c := &Client{
 		cfg:    cfg,
 		router: r,
@@ -37,13 +64,24 @@ func newClient(cfg Config, r *Router, bus *EventBus, store Store, log ILogger) *
 		ctx:    ctx,
 		cancel: cancel,
 	}
+
 	if cfg.MaxConcurrency > 0 {
 		c.sem = make(chan struct{}, cfg.MaxConcurrency)
 	}
+
 	return c
 }
 
 func (c *Client) connect() error {
+	c.connectMu.Lock()
+	defer c.connectMu.Unlock()
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return ErrClientClosed
+	}
+	c.mu.Unlock()
+
 	opts := paho.NewClientOptions().
 		AddBroker(c.cfg.BrokerURL).
 		SetClientID(c.cfg.ClientID).
@@ -64,24 +102,82 @@ func (c *Client) connect() error {
 		opts.SetTLSConfig(tlsCfg)
 	}
 
-	opts.SetOnConnectHandler(func(_ paho.Client) {
-		c.up.Store(true)
-		c.log.Info(fmt.Sprintf("connected broker %s", c.cfg.BrokerURL))
-		if err := c.subscribeAll(); err != nil {
-			c.log.Error(fmt.Sprintf("resubscribe failed: %v", err))
+	opts.SetOnConnectHandler(func(client paho.Client) {
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			return
 		}
+		c.connected.Store(true)
+		c.ready.Store(false)
+		c.up.Store(false)
+		c.mu.Unlock()
+
+		c.log.Info(fmt.Sprintf("connected broker %s", c.cfg.BrokerURL))
+
+		if err := c.subscribeAll(client); err != nil {
+			c.log.Error(fmt.Sprintf("subscribe failed: %v", err))
+			c.ready.Store(false)
+			c.up.Store(false)
+			return
+		}
+
+		c.mu.Lock()
+		if !c.closed {
+			c.ready.Store(true)
+			c.up.Store(true)
+		}
+		c.mu.Unlock()
 	})
+
 	opts.SetConnectionLostHandler(func(_ paho.Client, err error) {
+		c.connected.Store(false)
+		c.ready.Store(false)
 		c.up.Store(false)
 		c.log.Warn(fmt.Sprintf("connection lost: %v", err))
 	})
 
-	c.paho = paho.NewClient(opts)
-	token := c.paho.Connect()
+	client := paho.NewClient(opts)
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return ErrClientClosed
+	}
+	c.paho = client
+	c.mu.Unlock()
+
+	token := client.Connect()
+
 	if !token.WaitTimeout(15 * time.Second) {
+		client.Disconnect(0)
+		c.connected.Store(false)
+		c.ready.Store(false)
+		c.up.Store(false)
+		c.cancel()
+
+		c.mu.Lock()
+		c.closed = true
+		c.mu.Unlock()
+
 		return errors.New("witches-mqtt: connect timeout")
 	}
-	return token.Error()
+
+	if err := token.Error(); err != nil {
+		client.Disconnect(0)
+		c.connected.Store(false)
+		c.ready.Store(false)
+		c.up.Store(false)
+		c.cancel()
+
+		c.mu.Lock()
+		c.closed = true
+		c.mu.Unlock()
+
+		return fmt.Errorf("witches-mqtt: connect: %w", err)
+	}
+
+	return nil
 }
 
 func buildTLS(c *TLSConfig) (*tls.Config, error) {
@@ -89,6 +185,7 @@ func buildTLS(c *TLSConfig) (*tls.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read ca: %w", err)
 	}
+
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(ca) {
 		return nil, errors.New("invalid CA pem")
@@ -106,19 +203,23 @@ func buildTLS(c *TLSConfig) (*tls.Config, error) {
 	}, nil
 }
 
-func (c *Client) subscribeAll() error {
+func (c *Client) subscribeAll(client paho.Client) error {
 	patterns := c.router.Patterns()
 	if len(patterns) == 0 {
 		return nil
 	}
+
 	topics := make(map[string]byte, len(patterns))
 	for _, p := range patterns {
 		topics[p] = c.cfg.QoS
 	}
-	token := c.paho.SubscribeMultiple(topics, c.onMessage)
+
+	token := client.SubscribeMultiple(topics, c.onMessage)
+
 	if !token.WaitTimeout(15 * time.Second) {
 		return errors.New("witches-mqtt: subscribe timeout")
 	}
+
 	return token.Error()
 }
 
@@ -126,41 +227,114 @@ func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
 	topic := msg.Topic()
 	payload := append([]byte(nil), msg.Payload()...)
 
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+
 	if c.sem != nil {
 		select {
 		case c.sem <- struct{}{}:
 		default:
-			c.log.Warn(fmt.Sprintf("concurrency limit hit, dropping topic=%s", msg.Topic()))
+			c.log.Warn(fmt.Sprintf(
+				"concurrency limit hit, dropping topic=%s",
+				topic,
+			))
+			c.mu.Unlock()
 			return
 		}
 	}
+
+	c.workers.Add(1)
+	c.mu.Unlock()
+
 	go func() {
+		defer c.workers.Done()
+
 		if c.sem != nil {
 			defer func() { <-c.sem }()
 		}
+
 		if err := c.router.Dispatch(c.ctx, topic, payload); err != nil {
-			c.log.Error(fmt.Sprintf("dispatch failed, topic=%s, err=%v", msg.Topic(), err))
+			c.log.Error(fmt.Sprintf(
+				"dispatch failed, topic=%s, err=%v",
+				topic,
+				err,
+			))
 		}
 	}()
 }
 
-func (c *Client) publish(topic string, payload []byte, qos byte, retained bool) error {
-	if !c.up.Load() {
-		return errors.New("witches-mqtt: not connected")
+func (c *Client) publish(
+	topic string,
+	payload []byte,
+	qos byte,
+	retained bool,
+) error {
+	c.publishMu.Lock()
+	defer c.publishMu.Unlock()
+
+	c.mu.Lock()
+	closed := c.closed
+	client := c.paho
+	c.mu.Unlock()
+
+	if closed {
+		return ErrClientClosed
 	}
-	token := c.paho.Publish(topic, qos, retained, payload)
+
+	if !c.ready.Load() || client == nil {
+		return ErrNotReady
+	}
+
+	token := client.Publish(topic, qos, retained, payload)
+
 	if !token.WaitTimeout(5 * time.Second) {
 		return errors.New("witches-mqtt: publish timeout")
 	}
+
 	return token.Error()
 }
 
 func (c *Client) close() {
-	if c.paho != nil && c.up.Load() {
-		if c.cfg.StatusTopic != "" {
-			c.paho.Publish(c.cfg.StatusTopic, c.cfg.QoS, true, []byte("offline"))
+
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		c.closed = true
+		client := c.paho
+		c.ready.Store(false)
+		c.up.Store(false)
+		c.mu.Unlock()
+
+		// Stop workers from accepting further work.
+		c.cancel()
+		c.connectMu.Lock()
+		defer c.connectMu.Unlock()
+
+		// Wait for all accepted handlers.
+		c.workers.Wait()
+
+		// Serialize shutdown with regular Publish calls.
+		c.publishMu.Lock()
+		defer c.publishMu.Unlock()
+
+		if client != nil {
+			if c.cfg.StatusTopic != "" && c.connected.Load() {
+				token := client.Publish(
+					c.cfg.StatusTopic,
+					c.cfg.QoS,
+					true,
+					[]byte("offline"),
+				)
+				token.WaitTimeout(2 * time.Second)
+			}
+
+			client.Disconnect(500)
 		}
-		c.paho.Disconnect(500)
-	}
-	c.cancel()
+
+		c.connected.Store(false)
+		c.ready.Store(false)
+		c.up.Store(false)
+	})
 }
