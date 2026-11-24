@@ -19,6 +19,10 @@ var (
 	ErrNotReady     = errors.New("witches-mqtt: client not ready")
 )
 
+type inboundMessage struct {
+	topic   string
+	payload []byte
+}
 type Client struct {
 	cfg    Config
 	router *Router
@@ -44,6 +48,10 @@ type Client struct {
 	publishMu sync.Mutex
 
 	connectMu sync.Mutex
+
+	enableQueue bool
+	queue       chan inboundMessage
+	workerCount int
 }
 
 func newClient(
@@ -224,30 +232,46 @@ func (c *Client) subscribeAll(client paho.Client) error {
 }
 
 func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
-	topic := msg.Topic()
-	payload := append([]byte(nil), msg.Payload()...)
+	in := inboundMessage{
+		topic:   msg.Topic(),
+		payload: append([]byte(nil), msg.Payload()...),
+	}
 
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.closed {
-		c.mu.Unlock()
 		return
 	}
 
+	// Queue mode
+	if c.enableQueue {
+		select {
+		case c.queue <- in:
+			// Successfully enqueued.
+		default:
+			c.log.Warn(fmt.Sprintf(
+				"mqtt queue full, dropping topic=%s",
+				in.topic,
+			))
+		}
+		return
+	}
+
+	// Direct dispatch mode (existing behavior)
 	if c.sem != nil {
 		select {
 		case c.sem <- struct{}{}:
 		default:
 			c.log.Warn(fmt.Sprintf(
 				"concurrency limit hit, dropping topic=%s",
-				topic,
+				in.topic,
 			))
-			c.mu.Unlock()
 			return
 		}
 	}
 
 	c.workers.Add(1)
-	c.mu.Unlock()
 
 	go func() {
 		defer c.workers.Done()
@@ -256,10 +280,10 @@ func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
 			defer func() { <-c.sem }()
 		}
 
-		if err := c.router.Dispatch(c.ctx, topic, payload); err != nil {
+		if err := c.router.Dispatch(c.ctx, in.topic, in.payload); err != nil {
 			c.log.Error(fmt.Sprintf(
-				"dispatch failed, topic=%s, err=%v",
-				topic,
+				"dispatch failed topic=%s err=%v",
+				in.topic,
 				err,
 			))
 		}
@@ -298,7 +322,6 @@ func (c *Client) publish(
 }
 
 func (c *Client) close() {
-
 	c.closeOnce.Do(func() {
 		c.mu.Lock()
 		c.closed = true
@@ -307,18 +330,10 @@ func (c *Client) close() {
 		c.up.Store(false)
 		c.mu.Unlock()
 
-		// Stop workers from accepting further work.
-		c.cancel()
 		c.connectMu.Lock()
 		defer c.connectMu.Unlock()
 
-		// Wait for all accepted handlers.
-		c.workers.Wait()
-
-		// Serialize shutdown with regular Publish calls.
 		c.publishMu.Lock()
-		defer c.publishMu.Unlock()
-
 		if client != nil {
 			if c.cfg.StatusTopic != "" && c.connected.Load() {
 				token := client.Publish(
@@ -329,12 +344,66 @@ func (c *Client) close() {
 				)
 				token.WaitTimeout(2 * time.Second)
 			}
-
 			client.Disconnect(500)
+		}
+		c.publishMu.Unlock()
+
+		if c.enableQueue {
+			c.mu.Lock()
+			close(c.queue)
+			c.mu.Unlock()
+
+			// Drain accepted messages before canceling context.
+			c.workers.Wait()
+			c.cancel()
+		} else {
+			c.cancel()
+			c.workers.Wait()
 		}
 
 		c.connected.Store(false)
 		c.ready.Store(false)
 		c.up.Store(false)
 	})
+}
+
+func (c *Client) startWorkers() error {
+	if !c.enableQueue {
+		return nil
+	}
+
+	size := c.cfg.BufferSize
+	if size <= 0 {
+		size = 512
+	}
+
+	workerCount := c.cfg.MaxConcurrency
+	if workerCount <= 0 {
+		workerCount = 64
+	}
+
+	c.queue = make(chan inboundMessage, size)
+	c.workerCount = workerCount
+
+	for i := 0; i < workerCount; i++ {
+		c.workers.Add(1)
+		go c.worker(i)
+	}
+
+	return nil
+}
+
+func (c *Client) worker(id int) {
+	defer c.workers.Done()
+	//fmt.Printf("[Worker %d] started\n", id)
+	for msg := range c.queue {
+		//fmt.Printf("[Worker %d] received topic=%s payload=%s\n",
+		//	id, msg.topic, string(msg.payload))
+
+		err := c.router.Dispatch(c.ctx, msg.topic, msg.payload)
+		if err != nil {
+			fmt.Printf("[Worker %d] dispatch error: %v\n", id, err)
+		}
+	}
+	//fmt.Printf("[Worker %d] stopped\n", id)
 }
