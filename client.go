@@ -24,59 +24,40 @@ type inboundMessage struct {
 	payload []byte
 }
 type Client struct {
-	cfg    Config
-	router *Router
-	bus    *EventBus
-	store  Store
-	paho   paho.Client
-	log    ILogger
-
-	ctx    context.Context
-	cancel context.CancelFunc
-
-	connected atomic.Bool
-	ready     atomic.Bool
-	up        atomic.Bool
-
-	sem chan struct{}
-
-	mu        sync.Mutex
-	closed    bool
-	workers   sync.WaitGroup
-	closeOnce sync.Once
-
-	publishMu sync.Mutex
-
-	connectMu sync.Mutex
-
+	cfg         Config
+	router      *Router
+	paho        paho.Client
+	log         ILogger
+	ctx         context.Context
+	cancel      context.CancelFunc
+	connected   atomic.Bool
+	ready       atomic.Bool
+	up          atomic.Bool
+	sem         chan struct{}
+	mu          sync.Mutex
+	closed      bool
+	workers     sync.WaitGroup
+	closeOnce   sync.Once
+	publishMu   sync.Mutex
+	connectMu   sync.Mutex
 	enableQueue bool
 	queue       chan inboundMessage
 	workerCount int
 }
 
-func newClient(
-	cfg Config,
-	r *Router,
-	bus *EventBus,
-	store Store,
-	log ILogger,
-) *Client {
+func newClient(cfg Config, r *Router, log ILogger) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	c := &Client{
 		cfg:    cfg,
 		router: r,
-		bus:    bus,
-		store:  store,
 		log:    log,
 		ctx:    ctx,
 		cancel: cancel,
 	}
-
 	if cfg.MaxConcurrency > 0 {
 		c.sem = make(chan struct{}, cfg.MaxConcurrency)
 	}
-
 	return c
 }
 
@@ -290,12 +271,7 @@ func (c *Client) onMessage(_ paho.Client, msg paho.Message) {
 	}()
 }
 
-func (c *Client) publish(
-	topic string,
-	payload []byte,
-	qos byte,
-	retained bool,
-) error {
+func (c *Client) publish(topic string, payload []byte, qos byte, retained bool) error {
 	c.publishMu.Lock()
 	defer c.publishMu.Unlock()
 

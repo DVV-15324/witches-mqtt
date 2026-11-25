@@ -15,7 +15,6 @@ type Event struct {
 	ReceivedAt time.Time      `json:"received_at"`
 	Seq        uint64         `json:"seq,omitempty"`
 	Raw        map[string]any `json:"raw,omitempty"`
-	Status     string         `json:"status"` // pending | confirmed | disputed
 }
 
 type Handler interface {

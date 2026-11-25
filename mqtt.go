@@ -5,11 +5,12 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+var _ = errgroup.Group{}
+
 type Options struct {
-	Router *Router
-	Bus    *EventBus
-	Store  Store
-	Logger ILogger
+	Router      *Router
+	Logger      ILogger
+	EnableQueue bool // enable bounded queue + worker pool
 }
 
 type Module struct {
@@ -25,17 +26,19 @@ func Mount(cfg Config, opts Options) (*Module, error) {
 	if opts.Router == nil {
 		opts.Router = NewRouter()
 	}
-	if opts.Bus == nil {
-		opts.Bus = NewEventBus()
-	}
-	if opts.Logger == nil {
-		opts.Logger = &defaultLogger{}
-	}
-	if opts.Store == nil {
-		opts.Store = NewMemoryStore()
-	}
-	c := newClient(cfg, opts.Router, opts.Bus, opts.Store, opts.Logger)
+
+	c := newClient(cfg, opts.Router, opts.Logger)
 	if err := c.connect(); err != nil {
+		return nil, err
+	}
+	c.enableQueue = opts.EnableQueue
+
+	if err := c.startWorkers(); err != nil {
+		return nil, err
+	}
+
+	if err := c.connect(); err != nil {
+		c.close()
 		return nil, err
 	}
 	return &Module{client: c, log: opts.Logger}, nil
@@ -54,12 +57,3 @@ func (m *Module) Health(ctx context.Context) Health {
 func (m *Module) Publish(topic string, payload []byte, qos byte, retained bool) error {
 	return m.client.publish(topic, payload, qos, retained)
 }
-
-var _ = errgroup.Group{}
-
-type defaultLogger struct{}
-
-func (l *defaultLogger) Info(msg string)  {}
-func (l *defaultLogger) Warn(msg string)  {}
-func (l *defaultLogger) Error(msg string) {}
-func (l *defaultLogger) Debug(msg string) {}
